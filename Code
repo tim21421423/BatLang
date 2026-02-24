@@ -1,0 +1,819 @@
+#include <Windows.h>
+#include <string>
+#include <vector>
+#include <sstream>
+#include <fstream>
+#include <regex>
+#include <map>
+#include <commctrl.h>
+#include <Uxtheme.h>
+#include <dwmapi.h>
+
+#pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "Uxtheme.lib")
+#pragma comment(lib, "dwmapi.lib")
+#pragma comment(linker,"\"/manifestdependency:type='win32' \
+name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
+processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+
+// Global variables for UI controls
+HWND g_hTextBox, g_hButtonCompile, g_hButtonRun, g_hStatusBar;
+HWND g_hTabControl, g_hExamplesList;
+HFONT g_hFontTitle, g_hFontNormal, g_hFontCode;
+HBRUSH g_hBrushBackground;
+
+// Color scheme - using unique names to avoid conflicts
+const COLORREF BATLANG_COLOR_BG = RGB(30, 30, 36);      // Dark gray background
+const COLORREF BATLANG_COLOR_TEXTBOX_BG = RGB(37, 37, 44); // Slightly lighter for textbox
+const COLORREF BATLANG_COLOR_TEXT = RGB(220, 220, 220);    // Light gray text
+const COLORREF BATLANG_COLOR_BUTTON = RGB(86, 86, 96);     // Gray for buttons
+const COLORREF BATLANG_COLOR_BUTTON_HOVER = RGB(106, 106, 116); // Lighter on hover
+const COLORREF BATLANG_COLOR_ACCENT = RGB(118, 150, 255);  // Accent blue
+
+// Structure for code examples
+struct CodeExample {
+    std::wstring name;
+    std::wstring code;
+};
+
+std::vector<CodeExample> examples = {
+    {
+        L"Language Basics",
+        L"add name = \"BatLang\"\n"
+        L"add version = 1.0\n"
+        L"print(\"Hello World!\")\n"
+        L"println(\"Double output\")\n"
+        L"wait(2)\n"
+        L"stop\n"
+        L"end)"
+    },
+    {
+        L"Mathematics",
+        L"add x = 10\n"
+        L"add y = 20\n"
+        L"add z = x + y\n"
+        L"print(\"Sum x + y = \")\n"
+        L"print(z)\n"
+        L"print(x * y)\n"
+        L"wait(2)\n"
+        L"end)"
+    },
+    {
+        L"Conditions",
+        L"add count = 5\n"
+        L"if not count = 0\n"
+        L"print(\"Counter is not zero!\")\n"
+        L"end\n"
+        L"wait(2)\n"
+        L"end)"
+    },
+    {
+        L"System Commands",
+        L"title(\"My Program\")\n"
+        L"color(2)\n"
+        L"clear\n"
+        L"namepc()\n"
+        L"ipcfg()\n"
+        L"showdata()\n"
+        L"time()\n"
+        L"programlist()\n"
+        L"wait(3)\n"
+        L"end)"
+    },
+    {
+        L"Additional Functions",
+        L"msgbox(\"Hello! This is a message\")\n"
+        L"openurl(\"https://www.google.com\")\n"
+        L"beep(750, 500)\n"
+        L"sleep(2)\n"
+        L"kill(\"notepad.exe\")\n"
+        L"wait(1)\n"
+        L"Close()\n"
+        L"end)"
+    }
+};
+
+// Function to extract quoted content (supports any characters)
+std::string ExtractQuotedContent(const std::string& str, size_t startPos) {
+    size_t firstQuote = str.find('"', startPos);
+    if (firstQuote == std::string::npos) return "";
+
+    size_t secondQuote = str.find('"', firstQuote + 1);
+    if (secondQuote == std::string::npos) return "";
+
+    return str.substr(firstQuote + 1, secondQuote - firstQuote - 1);
+}
+
+// Function to compile BatLang to BAT
+std::string CompileBatLang(const std::string& sourceCode) {
+    std::stringstream result;
+    std::istringstream stream(sourceCode);
+    std::string line;
+    std::map<std::string, std::string> variables;
+    bool compiling = true;
+    int indentLevel = 0;
+
+    result << "@echo off\n";
+    result << "setlocal enabledelayedexpansion\n\n";
+
+    while (std::getline(stream, line)) {
+        // Skip empty lines
+        if (line.empty()) continue;
+
+        // Check for end of compilation
+        if (line.find("end)") != std::string::npos) {
+            compiling = false;
+            break;
+        }
+
+        if (!compiling) continue;
+
+        // Process BatLang commands
+        std::string trimmedLine = std::regex_replace(line, std::regex("^\\s+|\\s+$"), "");
+
+        // add command (create variable)
+        if (trimmedLine.substr(0, 3) == "add") {
+            std::regex addRegex("add\\s+(\\w+)\\s*=\\s*(.*)");
+            std::smatch match;
+
+            if (std::regex_match(trimmedLine, match, addRegex)) {
+                std::string varName = match[1];
+                std::string varValue = match[2];
+
+                // Check if value is a quoted string
+                if (varValue.find('"') == 0) {
+                    std::string strValue = ExtractQuotedContent(trimmedLine, trimmedLine.find('=') + 1);
+                    result << "set " << varName << "=" << strValue << "\n";
+                    variables[varName] = strValue;
+                }
+                // Check if value contains math expression
+                else if (varValue.find('+') != std::string::npos ||
+                    varValue.find('-') != std::string::npos ||
+                    varValue.find('*') != std::string::npos ||
+                    varValue.find('/') != std::string::npos) {
+                    result << "set /a " << varName << "=" << varValue << "\n";
+                }
+                // Otherwise it's just a number
+                else {
+                    result << "set /a " << varName << "=" << varValue << "\n";
+                }
+            }
+        }
+
+        // print command
+        else if (trimmedLine.substr(0, 5) == "print") {
+            size_t openParen = trimmedLine.find('(');
+            size_t closeParen = trimmedLine.find(')');
+
+            if (openParen != std::string::npos && closeParen != std::string::npos) {
+                std::string content = trimmedLine.substr(openParen + 1, closeParen - openParen - 1);
+                content = std::regex_replace(content, std::regex("^\\s+|\\s+$"), "");
+
+                if (content.find('"') == 0) {
+                    std::string text = ExtractQuotedContent(trimmedLine, openParen + 1);
+                    result << "echo " << text << "\n";
+                }
+                else if (content.find('+') != std::string::npos ||
+                    content.find('-') != std::string::npos ||
+                    content.find('*') != std::string::npos ||
+                    content.find('/') != std::string::npos) {
+                    result << "set /a result=" << content << "\n";
+                    result << "echo !result!\n";
+                }
+                else {
+                    result << "echo %" << content << "%\n";
+                }
+            }
+        }
+
+        // println command (double echo)
+        else if (trimmedLine.substr(0, 7) == "println") {
+            size_t openParen = trimmedLine.find('(');
+            size_t closeParen = trimmedLine.find(')');
+
+            if (openParen != std::string::npos && closeParen != std::string::npos) {
+                std::string content = trimmedLine.substr(openParen + 1, closeParen - openParen - 1);
+                content = std::regex_replace(content, std::regex("^\\s+|\\s+$"), "");
+
+                if (content.find('"') == 0) {
+                    std::string text = ExtractQuotedContent(trimmedLine, openParen + 1);
+                    result << "echo " << text << "\n";
+                    result << "echo " << text << "\n";
+                }
+                else {
+                    result << "echo %" << content << "%\n";
+                    result << "echo %" << content << "%\n";
+                }
+            }
+        }
+
+        // wait command (old version for compatibility)
+        else if (trimmedLine.substr(0, 4) == "wait") {
+            std::regex waitRegex("wait\\(\\s*(\\d+)\\s*\\)");
+            std::smatch match;
+
+            if (std::regex_match(trimmedLine, match, waitRegex)) {
+                result << "timeout /t " << match[1] << " /nobreak >nul\n";
+            }
+        }
+
+        // sleep command (new version)
+        else if (trimmedLine.substr(0, 5) == "sleep") {
+            std::regex sleepRegex("sleep\\(\\s*(\\d+)\\s*\\)");
+            std::smatch match;
+
+            if (std::regex_match(trimmedLine, match, sleepRegex)) {
+                result << "timeout /t " << match[1] << " /nobreak >nul\n";
+            }
+        }
+
+        // if command
+        else if (trimmedLine.substr(0, 2) == "if") {
+            std::regex ifRegex("if\\s+not\\s+(\\w+)\\s*=\\s*(\\w+)");
+            std::smatch match;
+
+            if (std::regex_match(trimmedLine, match, ifRegex)) {
+                result << "if not %" << match[1] << "%==%" << match[2] << "% (\n";
+                indentLevel++;
+            }
+        }
+
+        // end command (end of if block)
+        else if (trimmedLine == "end") {
+            if (indentLevel > 0) {
+                result << ")\n";
+                indentLevel--;
+            }
+        }
+
+        // stop command (pause)
+        else if (trimmedLine == "stop") {
+            result << "pause\n";
+        }
+
+        // clear command (cls)
+        else if (trimmedLine == "clear") {
+            result << "cls\n";
+        }
+
+        // color command
+        else if (trimmedLine.substr(0, 5) == "color") {
+            std::regex colorRegex("color\\(\\s*(\\d+)\\s*\\)");
+            std::smatch match;
+
+            if (std::regex_match(trimmedLine, match, colorRegex)) {
+                result << "color " << match[1] << "\n";
+            }
+        }
+
+        // title command
+        else if (trimmedLine.substr(0, 5) == "title") {
+            size_t openParen = trimmedLine.find('(');
+            size_t closeParen = trimmedLine.find(')');
+
+            if (openParen != std::string::npos && closeParen != std::string::npos) {
+                std::string content = trimmedLine.substr(openParen + 1, closeParen - openParen - 1);
+                content = std::regex_replace(content, std::regex("^\\s+|\\s+$"), "");
+
+                if (content.find('"') == 0) {
+                    std::string title = ExtractQuotedContent(trimmedLine, openParen + 1);
+                    result << "title " << title << "\n";
+                }
+                else {
+                    result << "title " << content << "\n";
+                }
+            }
+        }
+
+        // restart command (reboot)
+        else if (trimmedLine == "restart") {
+            result << "shutdown /r /t 0\n";
+        }
+
+        // Close() command (exit)
+        else if (trimmedLine == "Close()") {
+            result << "exit\n";
+        }
+
+        // namepc() command (hostname)
+        else if (trimmedLine == "namepc()") {
+            result << "hostname\n";
+        }
+
+        // ipcfg() command (ipconfig)
+        else if (trimmedLine == "ipcfg()") {
+            result << "ipconfig\n";
+        }
+
+        // ping command
+        else if (trimmedLine.substr(0, 4) == "ping") {
+            size_t openParen = trimmedLine.find('(');
+            size_t closeParen = trimmedLine.find(')');
+
+            if (openParen != std::string::npos && closeParen != std::string::npos) {
+                std::string target = trimmedLine.substr(openParen + 1, closeParen - openParen - 1);
+                target = std::regex_replace(target, std::regex("^\\s+|\\s+$"), "");
+
+                if (target.find('"') == 0) {
+                    target = ExtractQuotedContent(trimmedLine, openParen + 1);
+                }
+                result << "ping " << target << "\n";
+            }
+        }
+
+        // programlist() command (tasklist)
+        else if (trimmedLine == "programlist()") {
+            result << "tasklist\n";
+        }
+
+        // kill command
+        else if (trimmedLine.substr(0, 4) == "kill") {
+            size_t openParen = trimmedLine.find('(');
+            size_t closeParen = trimmedLine.find(')');
+
+            if (openParen != std::string::npos && closeParen != std::string::npos) {
+                std::string process = trimmedLine.substr(openParen + 1, closeParen - openParen - 1);
+                process = std::regex_replace(process, std::regex("^\\s+|\\s+$"), "");
+
+                if (process.find('"') == 0) {
+                    process = ExtractQuotedContent(trimmedLine, openParen + 1);
+                }
+                result << "taskkill /IM " << process << " /F\n";
+            }
+        }
+
+        // showdata() command (date /t)
+        else if (trimmedLine == "showdata()") {
+            result << "date /t\n";
+        }
+
+        // time() command (time /t)
+        else if (trimmedLine == "time()") {
+            result << "time /t\n";
+        }
+
+        // msgbox command
+        else if (trimmedLine.substr(0, 6) == "msgbox") {
+            size_t openParen = trimmedLine.find('(');
+            size_t closeParen = trimmedLine.find(')');
+
+            if (openParen != std::string::npos && closeParen != std::string::npos) {
+                std::string text = trimmedLine.substr(openParen + 1, closeParen - openParen - 1);
+                text = std::regex_replace(text, std::regex("^\\s+|\\s+$"), "");
+
+                if (text.find('"') == 0) {
+                    text = ExtractQuotedContent(trimmedLine, openParen + 1);
+                }
+                result << "powershell -Command \"[System.Windows.Forms.MessageBox]::Show('" << text << "')\"\n";
+            }
+        }
+
+        // openurl command
+        else if (trimmedLine.substr(0, 7) == "openurl") {
+            size_t openParen = trimmedLine.find('(');
+            size_t closeParen = trimmedLine.find(')');
+
+            if (openParen != std::string::npos && closeParen != std::string::npos) {
+                std::string url = trimmedLine.substr(openParen + 1, closeParen - openParen - 1);
+                url = std::regex_replace(url, std::regex("^\\s+|\\s+$"), "");
+
+                if (url.find('"') == 0) {
+                    url = ExtractQuotedContent(trimmedLine, openParen + 1);
+                }
+                result << "start " << url << "\n";
+            }
+        }
+
+        // beep command
+        else if (trimmedLine.substr(0, 4) == "beep") {
+            std::regex beepRegex("beep\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\)");
+            std::smatch match;
+
+            if (std::regex_match(trimmedLine, match, beepRegex)) {
+                result << "powershell -c \"[console]::beep(" << match[1] << "," << match[2] << ")\"\n";
+            }
+        }
+    }
+
+    result << "\npause\n";
+    return result.str();
+}
+
+// Button subclass procedure for custom drawing
+LRESULT CALLBACK ButtonSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    switch (msg) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+
+        // Get button state
+        bool isHovered = GetWindowLongPtr(hwnd, GWLP_USERDATA) == 1;
+        bool isPressed = GetAsyncKeyState(VK_LBUTTON) & 0x8000;
+
+        // Choose background color
+        COLORREF bgColor = isPressed ? BATLANG_COLOR_ACCENT : (isHovered ? BATLANG_COLOR_BUTTON_HOVER : BATLANG_COLOR_BUTTON);
+
+        // Create brush and fill
+        HBRUSH brush = CreateSolidBrush(bgColor);
+        FillRect(hdc, &rc, brush);
+        DeleteObject(brush);
+
+        // Draw border
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(60, 60, 70));
+        HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+        HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
+        SelectObject(hdc, oldPen);
+        SelectObject(hdc, oldBrush);
+        DeleteObject(pen);
+
+        // Get button text
+        wchar_t text[256];
+        GetWindowTextW(hwnd, text, 256);
+
+        // Draw text
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, BATLANG_COLOR_TEXT);
+        DrawTextW(hdc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+
+    case WM_MOUSEMOVE: {
+        TRACKMOUSEEVENT tme = { sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd, 0 };
+        if (GetWindowLongPtr(hwnd, GWLP_USERDATA) != 1) {
+            SetWindowLongPtr(hwnd, GWLP_USERDATA, 1);
+            TrackMouseEvent(&tme);
+            InvalidateRect(hwnd, NULL, TRUE);
+        }
+        break;
+    }
+
+    case WM_MOUSELEAVE: {
+        SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
+        InvalidateRect(hwnd, NULL, TRUE);
+        break;
+    }
+
+    case WM_ERASEBKGND:
+        return 1;
+    }
+
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+// Function to compile and run BAT file
+void CompileAndRun(bool runAfterCompile = false) {
+    // Get text from TextBox
+    int textLength = GetWindowTextLengthW(g_hTextBox);
+    wchar_t* wBuffer = new wchar_t[textLength + 1];
+    GetWindowTextW(g_hTextBox, wBuffer, textLength + 1);
+
+    // Convert wchar_t to string
+    int bufferSize = WideCharToMultiByte(CP_UTF8, 0, wBuffer, -1, NULL, 0, NULL, NULL);
+    char* buffer = new char[bufferSize];
+    WideCharToMultiByte(CP_UTF8, 0, wBuffer, -1, buffer, bufferSize, NULL, NULL);
+
+    std::string sourceCode(buffer);
+    delete[] wBuffer;
+    delete[] buffer;
+
+    // Compile code
+    std::string batCode = CompileBatLang(sourceCode);
+
+    // Save to file
+    std::ofstream batFile("program.bat");
+    if (batFile.is_open()) {
+        batFile << batCode;
+        batFile.close();
+
+        // Update status
+        SetWindowTextW(g_hStatusBar, L"Compilation successful! program.bat created.");
+
+        // Run if needed
+        if (runAfterCompile) {
+            ShellExecuteW(NULL, L"open", L"program.bat", NULL, NULL, SW_SHOW);
+            SetWindowTextW(g_hStatusBar, L"Program started!");
+        }
+    }
+    else {
+        SetWindowTextW(g_hStatusBar, L"Error creating file!");
+        MessageBoxW(NULL, L"Error creating file!", L"Error", MB_OK | MB_ICONERROR);
+    }
+}
+
+// Window procedure
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+    case WM_CREATE: {
+        // Create background brush
+        g_hBrushBackground = CreateSolidBrush(BATLANG_COLOR_BG);
+
+        // Create fonts
+        g_hFontTitle = CreateFontW(24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
+        g_hFontNormal = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
+        g_hFontCode = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Consolas");
+
+        // Create title
+        HWND hTitle = CreateWindowW(L"STATIC", L"BatLang IDE",
+            WS_CHILD | WS_VISIBLE | SS_CENTER,
+            10, 10, 780, 40, hwnd, NULL, NULL, NULL);
+        SendMessageW(hTitle, WM_SETFONT, (WPARAM)g_hFontTitle, TRUE);
+
+        // Create tabs
+        INITCOMMONCONTROLSEX icex;
+        icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
+        icex.dwICC = ICC_TAB_CLASSES;
+        InitCommonControlsEx(&icex);
+
+        g_hTabControl = CreateWindowW(WC_TABCONTROL, NULL,
+            WS_CHILD | WS_VISIBLE | TCS_FIXEDWIDTH,
+            10, 60, 780, 30, hwnd, NULL, NULL, NULL);
+        SendMessageW(g_hTabControl, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
+
+        // Add tabs
+        TCITEMW tie;
+        tie.mask = TCIF_TEXT;
+
+        wchar_t tab1[] = L"Editor";
+        wchar_t tab2[] = L"Examples";
+        wchar_t tab3[] = L"Help";
+
+        tie.pszText = tab1;
+        TabCtrl_InsertItem(g_hTabControl, 0, &tie);
+        tie.pszText = tab2;
+        TabCtrl_InsertItem(g_hTabControl, 1, &tie);
+        tie.pszText = tab3;
+        TabCtrl_InsertItem(g_hTabControl, 2, &tie);
+
+        // Create TextBox for code input
+        g_hTextBox = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE |
+            ES_AUTOVSCROLL | ES_AUTOHSCROLL | WS_VSCROLL | WS_HSCROLL,
+            10, 95, 600, 300, hwnd, NULL, NULL, NULL);
+        SendMessageW(g_hTextBox, WM_SETFONT, (WPARAM)g_hFontCode, TRUE);
+
+        // Create examples list (hidden by default)
+        g_hExamplesList = CreateWindowW(WC_LISTVIEW, NULL,
+            WS_CHILD | WS_BORDER | LVS_REPORT | LVS_SINGLESEL,
+            10, 95, 600, 300, hwnd, NULL, NULL, NULL);
+        SendMessageW(g_hExamplesList, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
+
+        // Setup ListView
+        LVCOLUMNW lvc;
+        lvc.mask = LVCF_WIDTH | LVCF_TEXT;
+        lvc.cx = 580;
+        wchar_t colName[] = L"Code Examples";
+        lvc.pszText = colName;
+        ListView_InsertColumn(g_hExamplesList, 0, &lvc);
+
+        // Add examples
+        for (size_t i = 0; i < examples.size(); i++) {
+            LVITEMW lvi;
+            lvi.mask = LVIF_TEXT;
+            lvi.iItem = (int)i;
+            lvi.iSubItem = 0;
+            lvi.pszText = (LPWSTR)examples[i].name.c_str();
+            ListView_InsertItem(g_hExamplesList, &lvi);
+        }
+
+        ShowWindow(g_hExamplesList, SW_HIDE);
+
+        // Create help box (hidden by default)
+        HWND hHelpBox = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT",
+            L"BatLang - Programming language for batch files\n\n"
+            L"Basic commands:\n"
+            L"• add variable = value - create variable\n"
+            L"• print(\"text\") - output text\n"
+            L"• println(\"text\") - double output\n"
+            L"• wait(seconds) - wait\n"
+            L"• sleep(seconds) - wait\n"
+            L"• if not x = y - condition\n"
+            L"• end - end of condition\n"
+            L"• stop - pause\n"
+            L"• clear - clear screen\n"
+            L"• color(N) - change color\n"
+            L"• title(\"text\") - window title\n"
+            L"• restart - reboot\n"
+            L"• Close() - exit\n"
+            L"• namepc() - computer name\n"
+            L"• ipcfg() - ipconfig\n"
+            L"• ping(address) - ping\n"
+            L"• programlist() - process list\n"
+            L"• kill(\"process.exe\") - kill process\n"
+            L"• showdata() - date\n"
+            L"• time() - time\n"
+            L"• msgbox(\"text\") - message box\n"
+            L"• openurl(\"link\") - open URL\n"
+            L"• beep(frequency, duration) - beep sound\n"
+            L"• end) - end of program",
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
+            10, 95, 600, 300, hwnd, NULL, NULL, NULL);
+        SendMessageW(hHelpBox, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
+
+        // Create Compile button
+        g_hButtonCompile = CreateWindowW(L"BUTTON", L"Compile",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            620, 95, 170, 45, hwnd, (HMENU)1, NULL, NULL);
+        SendMessageW(g_hButtonCompile, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
+        SetWindowSubclass(g_hButtonCompile, ButtonSubclassProc, 0, 0);
+
+        // Create Run button
+        g_hButtonRun = CreateWindowW(L"BUTTON", L"Run",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            620, 150, 170, 45, hwnd, (HMENU)2, NULL, NULL);
+        SendMessageW(g_hButtonRun, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
+        SetWindowSubclass(g_hButtonRun, ButtonSubclassProc, 0, 0);
+
+        // Create quick command buttons
+        const wchar_t* quickCommands[] = { L"add", L"print", L"wait", L"stop", L"clear", L"end)" };
+        for (int i = 0; i < 6; i++) {
+            HWND hQuickBtn = CreateWindowW(L"BUTTON", quickCommands[i],
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                620 + (i % 2) * 85, 205 + (i / 2) * 40, 80, 35,
+                hwnd, (HMENU)(10 + i), NULL, NULL);
+            SendMessageW(hQuickBtn, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
+            SetWindowSubclass(hQuickBtn, ButtonSubclassProc, 0, 0);
+        }
+
+        // Create status bar
+        g_hStatusBar = CreateWindowW(L"STATIC", L"Ready",
+            WS_CHILD | WS_VISIBLE | SS_CENTER,
+            10, 400, 780, 30, hwnd, NULL, NULL, NULL);
+        SendMessageW(g_hStatusBar, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
+
+        // Add example code to TextBox
+        const wchar_t* exampleCode = examples[0].code.c_str();
+        SetWindowTextW(g_hTextBox, exampleCode);
+
+        // Enable visual styles
+        SetWindowTheme(hwnd, L"Explorer", NULL);
+        break;
+    }
+
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX: {
+        HDC hdc = (HDC)wParam;
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, BATLANG_COLOR_TEXT);
+        SetBkColor(hdc, BATLANG_COLOR_TEXTBOX_BG);
+        return (LRESULT)CreateSolidBrush(BATLANG_COLOR_TEXTBOX_BG);
+    }
+
+    case WM_NOTIFY: {
+        if (((LPNMHDR)lParam)->hwndFrom == g_hTabControl) {
+            switch (((LPNMHDR)lParam)->code) {
+            case TCN_SELCHANGE: {
+                int sel = TabCtrl_GetCurSel(g_hTabControl);
+                ShowWindow(g_hTextBox, sel == 0 ? SW_SHOW : SW_HIDE);
+                ShowWindow(g_hExamplesList, sel == 1 ? SW_SHOW : SW_HIDE);
+                break;
+            }
+            }
+        }
+        break;
+    }
+
+    case WM_COMMAND: {
+        int wmId = LOWORD(wParam);
+
+        switch (wmId) {
+        case 1: // Compile button
+            CompileAndRun(false);
+            break;
+
+        case 2: // Run button
+            CompileAndRun(true);
+            break;
+
+        case 10: // add
+        case 11: // print
+        case 12: // wait
+        case 13: // stop
+        case 14: // clear
+        case 15: // end)
+        {
+            // Insert quick command into text
+            const wchar_t* commands[] = { L"add  = ", L"print(\"\" )", L"wait(1)", L"stop", L"clear", L"end)" };
+            int index = wmId - 10;
+            SendMessageW(g_hTextBox, EM_REPLACESEL, TRUE, (LPARAM)commands[index]);
+            break;
+        }
+        }
+
+        // Handle double click on example
+        if ((HWND)lParam == g_hExamplesList && HIWORD(wParam) == LBN_DBLCLK) {
+            int selIndex = ListView_GetNextItem(g_hExamplesList, -1, LVNI_SELECTED);
+            if (selIndex >= 0 && selIndex < (int)examples.size()) {
+                SetWindowTextW(g_hTextBox, examples[selIndex].code.c_str());
+                TabCtrl_SetCurSel(g_hTabControl, 0);
+                ShowWindow(g_hTextBox, SW_SHOW);
+                ShowWindow(g_hExamplesList, SW_HIDE);
+            }
+        }
+        break;
+    }
+
+    case WM_SIZE: {
+        // Update sizes when window is resized
+        int width = LOWORD(lParam);
+        int height = HIWORD(lParam);
+
+        SetWindowPos(g_hTextBox, NULL, 10, 95, width - 200, height - 150, SWP_NOZORDER);
+        SetWindowPos(g_hExamplesList, NULL, 10, 95, width - 200, height - 150, SWP_NOZORDER);
+        SetWindowPos(g_hStatusBar, NULL, 10, height - 45, width - 20, 30, SWP_NOZORDER);
+
+        // Update button positions
+        SetWindowPos(g_hButtonCompile, NULL, width - 180, 95, 170, 45, SWP_NOZORDER);
+        SetWindowPos(g_hButtonRun, NULL, width - 180, 150, 170, 45, SWP_NOZORDER);
+
+        // Update quick button positions
+        for (int i = 0; i < 6; i++) {
+            HWND hQuickBtn = GetDlgItem(hwnd, 10 + i);
+            if (hQuickBtn) {
+                SetWindowPos(hQuickBtn, NULL, width - 180 + (i % 2) * 85,
+                    205 + (i / 2) * 40, 80, 35, SWP_NOZORDER);
+            }
+        }
+        break;
+    }
+
+    case WM_ERASEBKGND: {
+        HDC hdc = (HDC)wParam;
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect(hdc, &rc, g_hBrushBackground);
+        return 1;
+    }
+
+    case WM_DESTROY: {
+        DeleteObject(g_hFontTitle);
+        DeleteObject(g_hFontNormal);
+        DeleteObject(g_hFontCode);
+        DeleteObject(g_hBrushBackground);
+        PostQuitMessage(0);
+        break;
+    }
+
+    default:
+        return DefWindowProcW(hwnd, uMsg, wParam, lParam);
+    }
+    return 0;
+}
+
+// Entry point
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    // Register window class
+    const wchar_t CLASS_NAME[] = L"BatLangIDE";
+
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = WindowProc;
+    wc.hInstance = hInstance;
+    wc.lpszClassName = CLASS_NAME;
+    wc.hbrBackground = NULL; // We'll draw background ourselves
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+
+    RegisterClassW(&wc);
+
+    // Create window
+    HWND hwnd = CreateWindowExW(
+        0, CLASS_NAME, L"BatLang",
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+        CW_USEDEFAULT, CW_USEDEFAULT, 900, 600,
+        NULL, NULL, hInstance, NULL
+    );
+
+    if (hwnd == NULL) {
+        return 0;
+    }
+
+    // Enable dark mode
+    BOOL enableDarkMode = TRUE;
+    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &enableDarkMode, sizeof(enableDarkMode));
+
+    ShowWindow(hwnd, nCmdShow);
+    UpdateWindow(hwnd);
+
+    // Message loop
+    MSG msg = {};
+    while (GetMessage(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
+    return 0;
+}
