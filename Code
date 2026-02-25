@@ -8,6 +8,8 @@
 #include <commctrl.h>
 #include <Uxtheme.h>
 #include <dwmapi.h>
+#include <cctype>
+#include <algorithm>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "Uxtheme.lib")
@@ -18,17 +20,29 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 // Global variables for UI controls
 HWND g_hTextBox, g_hButtonCompile, g_hButtonRun, g_hStatusBar;
-HWND g_hTabControl, g_hExamplesList;
+HWND g_hTabControl, g_hExamplesList, g_hHelpBox;
 HFONT g_hFontTitle, g_hFontNormal, g_hFontCode;
 HBRUSH g_hBrushBackground;
 
-// Color scheme - using unique names to avoid conflicts
-const COLORREF BATLANG_COLOR_BG = RGB(30, 30, 36);      // Dark gray background
-const COLORREF BATLANG_COLOR_TEXTBOX_BG = RGB(37, 37, 44); // Slightly lighter for textbox
-const COLORREF BATLANG_COLOR_TEXT = RGB(220, 220, 220);    // Light gray text
-const COLORREF BATLANG_COLOR_BUTTON = RGB(86, 86, 96);     // Gray for buttons
-const COLORREF BATLANG_COLOR_BUTTON_HOVER = RGB(106, 106, 116); // Lighter on hover
-const COLORREF BATLANG_COLOR_ACCENT = RGB(118, 150, 255);  // Accent blue
+// Color scheme
+const COLORREF BATLANG_COLOR_BG = RGB(30, 30, 36);
+const COLORREF BATLANG_COLOR_TEXTBOX_BG = RGB(37, 37, 44);
+const COLORREF BATLANG_COLOR_TEXT = RGB(220, 220, 220);
+const COLORREF BATLANG_COLOR_BUTTON = RGB(86, 86, 96);
+const COLORREF BATLANG_COLOR_BUTTON_HOVER = RGB(106, 106, 116);
+const COLORREF BATLANG_COLOR_ACCENT = RGB(118, 150, 255);
+const COLORREF BATLANG_COLOR_ERROR = RGB(255, 80, 80);
+const COLORREF BATLANG_COLOR_SUCCESS = RGB(80, 255, 80);
+
+// Service flags
+bool g_bGuiServiceEnabled = false;
+bool g_bWindowsAPIServiceEnabled = false;
+
+// Error structure
+struct CompileError {
+    int line;
+    std::string message;
+};
 
 // Structure for code examples
 struct CodeExample {
@@ -48,52 +62,63 @@ std::vector<CodeExample> examples = {
         L"end)"
     },
     {
-        L"Mathematics",
-        L"add x = 10\n"
-        L"add y = 20\n"
-        L"add z = x + y\n"
-        L"print(\"Sum x + y = \")\n"
-        L"print(z)\n"
-        L"print(x * y)\n"
-        L"wait(2)\n"
-        L"end)"
-    },
-    {
-        L"Conditions",
-        L"add count = 5\n"
-        L"if not count = 0\n"
-        L"print(\"Counter is not zero!\")\n"
-        L"end\n"
-        L"wait(2)\n"
-        L"end)"
-    },
-    {
-        L"System Commands",
-        L"title(\"My Program\")\n"
+        L"With Windows API",
+        L"ServiceAdd <WindowsAPI.h>\n\n"
+        L"title(\"System Info\")\n"
         L"color(2)\n"
-        L"clear\n"
         L"namepc()\n"
         L"ipcfg()\n"
         L"showdata()\n"
         L"time()\n"
-        L"programlist()\n"
         L"wait(3)\n"
         L"end)"
     },
     {
-        L"Additional Functions",
-        L"msgbox(\"Hello! This is a message\")\n"
-        L"openurl(\"https://www.google.com\")\n"
-        L"beep(750, 500)\n"
-        L"sleep(2)\n"
-        L"kill(\"notepad.exe\")\n"
-        L"wait(1)\n"
-        L"Close()\n"
+        L"Simple GUI Example",
+        L"ServiceAdd <ServiceGui.h>\n\n"
+        L"GuiService:AddGui(Frame)\n"
+        L"GuiService.Name = \"My Window\"\n"
+        L"GuiService:AddGui(Button)\n"
+        L"Button.Text = \"Click Me!\"\n"
+        L"$form.Controls.Add($button)\n"
+        L"$form.ShowDialog()\n"
+        L"end)"
+    },
+    {
+        L"GUI with Multiple Buttons",
+        L"ServiceAdd <ServiceGui.h>\n\n"
+        L"GuiService:AddGui(Frame)\n"
+        L"GuiService.Name = \"Test Window\"\n\n"
+        L"GuiService:AddGui(Button)\n"
+        L"Button.Text = \"Button 1\"\n"
+        L"$button1 = $button\n\n"
+        L"GuiService:AddGui(Button)\n"
+        L"Button.Text = \"Button 2\"\n"
+        L"$button2 = $button\n\n"
+        L"$form.Controls.Add($button1)\n"
+        L"$form.Controls.Add($button2)\n"
+        L"$form.ShowDialog()\n"
         L"end)"
     }
 };
 
-// Function to extract quoted content (supports any characters)
+// Helper function to trim whitespace
+std::string TrimString(const std::string& str) {
+    size_t first = str.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return "";
+    size_t last = str.find_last_not_of(" \t\r\n");
+    return str.substr(first, (last - first + 1));
+}
+
+// Helper function to convert string to lowercase
+std::string ToLowerString(const std::string& str) {
+    std::string result = str;
+    std::transform(result.begin(), result.end(), result.begin(),
+        [](unsigned char c) { return std::tolower(c); });
+    return result;
+}
+
+// Function to extract quoted content
 std::string ExtractQuotedContent(const std::string& str, size_t startPos) {
     size_t firstQuote = str.find('"', startPos);
     if (firstQuote == std::string::npos) return "";
@@ -104,34 +129,296 @@ std::string ExtractQuotedContent(const std::string& str, size_t startPos) {
     return str.substr(firstQuote + 1, secondQuote - firstQuote - 1);
 }
 
+// Function to check if line contains GUI commands
+bool ContainsGuiCommands(const std::string& line) {
+    std::string lowerLine = ToLowerString(line);
+    return (lowerLine.find("guiservice:") != std::string::npos ||
+        lowerLine.find("button.text") != std::string::npos ||
+        lowerLine.find("$form.") != std::string::npos);
+}
+
+// Function to check if line contains Windows API commands
+bool ContainsWindowsAPICommands(const std::string& line) {
+    std::string lowerLine = ToLowerString(line);
+    return (lowerLine.find("restart") != std::string::npos ||
+        lowerLine.find("namepc()") != std::string::npos ||
+        lowerLine.find("ipcfg()") != std::string::npos ||
+        lowerLine.find("ping(") != std::string::npos ||
+        lowerLine.find("programlist()") != std::string::npos ||
+        lowerLine.find("kill(") != std::string::npos ||
+        lowerLine.find("showdata()") != std::string::npos ||
+        lowerLine.find("time()") != std::string::npos ||
+        lowerLine.find("msgbox(") != std::string::npos ||
+        lowerLine.find("openurl(") != std::string::npos ||
+        lowerLine.find("beep(") != std::string::npos);
+}
+
+// Function to validate services
+std::vector<CompileError> ValidateServices(const std::string& sourceCode) {
+    std::vector<CompileError> errors;
+    std::istringstream stream(sourceCode);
+    std::string line;
+    int lineNumber = 0;
+
+    g_bGuiServiceEnabled = false;
+    g_bWindowsAPIServiceEnabled = false;
+
+    // First pass - check for service declarations (case insensitive, trim spaces)
+    while (std::getline(stream, line)) {
+        lineNumber++;
+
+        std::string trimmedLine = TrimString(line);
+        std::string lowerLine = ToLowerString(trimmedLine);
+
+        // Check for GUI service (support both formats)
+        if (lowerLine.find("serviceadd <guiservice.h>") != std::string::npos ||
+            lowerLine.find("serviceadd <servicegui.h>") != std::string::npos) {
+            g_bGuiServiceEnabled = true;
+        }
+
+        // Check for Windows API service
+        if (lowerLine.find("serviceadd <windowsapi.h>") != std::string::npos) {
+            g_bWindowsAPIServiceEnabled = true;
+        }
+    }
+
+    // Reset stream for second pass
+    stream.clear();
+    stream.seekg(0);
+    lineNumber = 0;
+
+    // Second pass - validate usage
+    while (std::getline(stream, line)) {
+        lineNumber++;
+
+        std::string trimmedLine = TrimString(line);
+
+        // Skip service declaration lines
+        if (trimmedLine.find("ServiceAdd <") != std::string::npos) {
+            continue;
+        }
+
+        if (ContainsGuiCommands(trimmedLine) && !g_bGuiServiceEnabled) {
+            CompileError error;
+            error.line = lineNumber;
+            error.message = "You Forgot To Add Service \"ServiceGui.h\"";
+            errors.push_back(error);
+        }
+
+        if (ContainsWindowsAPICommands(trimmedLine) && !g_bWindowsAPIServiceEnabled) {
+            CompileError error;
+            error.line = lineNumber;
+            error.message = "You Forgot To Add Service \"WindowsAPI.h\"";
+            errors.push_back(error);
+        }
+    }
+
+    return errors;
+}
+
+// Function to compile GUI section - С ПОДДЕРЖКОЙ TEXTBOX
+std::string CompileGuiSection(std::istringstream& stream, std::string& currentLine, int& lineNumber) {
+    std::stringstream result;
+    std::stringstream psScript;
+
+    // Process the first line (GuiService:AddGui(Frame))
+    std::string trimmedCurrent = TrimString(currentLine);
+    if (trimmedCurrent.find("GuiService:AddGui(Frame)") != std::string::npos) {
+        psScript << "Add-Type -AssemblyName System.Windows.Forms; ";
+        psScript << "Add-Type -AssemblyName System.Drawing; ";
+        psScript << "$form = New-Object System.Windows.Forms.Form; ";
+        psScript << "$form.Size = New-Object System.Drawing.Size(400,300); ";
+        psScript << "$form.StartPosition = 'CenterScreen'; ";
+    }
+
+    std::string line;
+    bool inGuiSection = true;
+    int buttonCounter = 0;
+    int textboxCounter = 0;
+    int yPos = 20;
+    std::vector<std::string> controlVars; // Store all control variable names
+
+    while (inGuiSection && std::getline(stream, line)) {
+        lineNumber++;
+        std::string trimmedLine = TrimString(line);
+
+        if (trimmedLine.find("end)") != std::string::npos) {
+            // Add all controls to the form
+            for (const auto& ctrl : controlVars) {
+                psScript << "$form.Controls.Add($" << ctrl << "); ";
+            }
+            psScript << "$form.ShowDialog(); ";
+            result << "powershell -NoProfile -ExecutionPolicy Bypass -Command \"" << psScript.str() << "\"\n";
+            result << "pause\n";
+            return result.str();
+        }
+
+        if (trimmedLine.empty()) {
+            continue;
+        }
+
+        // GuiService.Name = "title"
+        if (trimmedLine.find("GuiService.Name =") != std::string::npos) {
+            std::regex nameRegex("GuiService\\.Name\\s*=\\s*\"(.*?)\"");
+            std::smatch match;
+            if (std::regex_search(trimmedLine, match, nameRegex)) {
+                psScript << "$form.Text = '" << match[1] << "'; ";
+            }
+        }
+
+        // GuiService:AddGui(Button)
+        else if (trimmedLine.find("GuiService:AddGui(Button)") != std::string::npos) {
+            buttonCounter++;
+            std::string btnVar = "button" + std::to_string(buttonCounter);
+            controlVars.push_back(btnVar);
+
+            psScript << "$" << btnVar << " = New-Object System.Windows.Forms.Button; ";
+            psScript << "$" << btnVar << ".Location = New-Object System.Drawing.Point(20," << yPos << "); ";
+            psScript << "$" << btnVar << ".Size = New-Object System.Drawing.Size(100,30); ";
+            yPos += 40;
+        }
+
+        // GuiService:AddGui(Textbox)
+        else if (trimmedLine.find("GuiService:AddGui(Textbox)") != std::string::npos ||
+            trimmedLine.find("GuiService:AddGui(TextBox)") != std::string::npos) {
+            textboxCounter++;
+            std::string txtVar = "textbox" + std::to_string(textboxCounter);
+            controlVars.push_back(txtVar);
+
+            psScript << "$" << txtVar << " = New-Object System.Windows.Forms.TextBox; ";
+            psScript << "$" << txtVar << ".Location = New-Object System.Drawing.Point(20," << yPos << "); ";
+            psScript << "$" << txtVar << ".Size = New-Object System.Drawing.Size(200,30); ";
+            yPos += 40;
+        }
+
+        // Button.Text = "text"
+        else if (trimmedLine.find("Button.Text =") != std::string::npos) {
+            std::regex textRegex("Button\\.Text\\s*=\\s*\"(.*?)\"");
+            std::smatch match;
+            if (std::regex_search(trimmedLine, match, textRegex)) {
+                psScript << "$button" << buttonCounter << ".Text = '" << match[1] << "'; ";
+            }
+        }
+
+        // Textbox.Text = "text"
+        else if (trimmedLine.find("Textbox.Text =") != std::string::npos ||
+            trimmedLine.find("TextBox.Text =") != std::string::npos) {
+            std::regex textRegex("(?:Textbox|TextBox)\\.Text\\s*=\\s*\"(.*?)\"");
+            std::smatch match;
+            if (std::regex_search(trimmedLine, match, textRegex)) {
+                psScript << "$textbox" << textboxCounter << ".Text = '" << match[1] << "'; ";
+            }
+        }
+
+        // Textbox.Width = value
+        else if (trimmedLine.find("Textbox.Width =") != std::string::npos ||
+            trimmedLine.find("TextBox.Width =") != std::string::npos) {
+            std::regex widthRegex("(?:Textbox|TextBox)\\.Width\\s*=\\s*(\\d+)");
+            std::smatch match;
+            if (std::regex_search(trimmedLine, match, widthRegex)) {
+                psScript << "$textbox" << textboxCounter << ".Width = " << match[1] << "; ";
+            }
+        }
+
+        // Textbox.Height = value
+        else if (trimmedLine.find("Textbox.Height =") != std::string::npos ||
+            trimmedLine.find("TextBox.Height =") != std::string::npos) {
+            std::regex heightRegex("(?:Textbox|TextBox)\\.Height\\s*=\\s*(\\d+)");
+            std::smatch match;
+            if (std::regex_search(trimmedLine, match, heightRegex)) {
+                psScript << "$textbox" << textboxCounter << ".Height = " << match[1] << "; ";
+            }
+        }
+
+        // Textbox.Top = value
+        else if (trimmedLine.find("Textbox.Top =") != std::string::npos ||
+            trimmedLine.find("TextBox.Top =") != std::string::npos) {
+            std::regex topRegex("(?:Textbox|TextBox)\\.Top\\s*=\\s*(\\d+)");
+            std::smatch match;
+            if (std::regex_search(trimmedLine, match, topRegex)) {
+                psScript << "$textbox" << textboxCounter << ".Top = " << match[1] << "; ";
+            }
+        }
+
+        // Textbox.Left = value
+        else if (trimmedLine.find("Textbox.Left =") != std::string::npos ||
+            trimmedLine.find("TextBox.Left =") != std::string::npos) {
+            std::regex leftRegex("(?:Textbox|TextBox)\\.Left\\s*=\\s*(\\d+)");
+            std::smatch match;
+            if (std::regex_search(trimmedLine, match, leftRegex)) {
+                psScript << "$textbox" << textboxCounter << ".Left = " << match[1] << "; ";
+            }
+        }
+
+        // $form.Controls.Add($control)
+        else if (trimmedLine.find("$form.Controls.Add") != std::string::npos) {
+            // This line is now handled automatically at the end
+            // But we'll still process it if the user writes it explicitly
+            psScript << trimmedLine << "; ";
+        }
+
+        // Button events (click)
+        else if (trimmedLine.find("$button.Add_Click") != std::string::npos) {
+            psScript << trimmedLine << "; ";
+        }
+    }
+
+    // Add all controls to the form
+    for (const auto& ctrl : controlVars) {
+        psScript << "$form.Controls.Add($" << ctrl << "); ";
+    }
+    psScript << "$form.ShowDialog(); ";
+    result << "powershell -NoProfile -ExecutionPolicy Bypass -Command \"" << psScript.str() << "\"\n";
+    result << "pause\n";
+    return result.str();
+}
 // Function to compile BatLang to BAT
-std::string CompileBatLang(const std::string& sourceCode) {
+std::string CompileBatLang(const std::string& sourceCode, std::vector<CompileError>& errors) {
     std::stringstream result;
     std::istringstream stream(sourceCode);
     std::string line;
     std::map<std::string, std::string> variables;
     bool compiling = true;
     int indentLevel = 0;
+    int lineNumber = 0;
+
+    // Validate services first
+    errors = ValidateServices(sourceCode);
+    if (!errors.empty()) {
+        return "";
+    }
 
     result << "@echo off\n";
     result << "setlocal enabledelayedexpansion\n\n";
 
     while (std::getline(stream, line)) {
-        // Skip empty lines
-        if (line.empty()) continue;
+        lineNumber++;
+
+        std::string trimmedLine = TrimString(line);
+
+        if (trimmedLine.empty()) continue;
+
+        // Skip service declarations
+        if (trimmedLine.find("ServiceAdd <") != std::string::npos) {
+            continue;
+        }
 
         // Check for end of compilation
-        if (line.find("end)") != std::string::npos) {
+        if (trimmedLine.find("end)") != std::string::npos) {
             compiling = false;
             break;
         }
 
         if (!compiling) continue;
 
-        // Process BatLang commands
-        std::string trimmedLine = std::regex_replace(line, std::regex("^\\s+|\\s+$"), "");
+        // Handle GUI section
+        if (trimmedLine.find("GuiService:AddGui(Frame)") != std::string::npos && g_bGuiServiceEnabled) {
+            std::string guiCode = CompileGuiSection(stream, line, lineNumber);
+            result << guiCode;
+            continue;
+        }
 
-        // add command (create variable)
+        // add command
         if (trimmedLine.substr(0, 3) == "add") {
             std::regex addRegex("add\\s+(\\w+)\\s*=\\s*(.*)");
             std::smatch match;
@@ -140,20 +427,17 @@ std::string CompileBatLang(const std::string& sourceCode) {
                 std::string varName = match[1];
                 std::string varValue = match[2];
 
-                // Check if value is a quoted string
                 if (varValue.find('"') == 0) {
                     std::string strValue = ExtractQuotedContent(trimmedLine, trimmedLine.find('=') + 1);
                     result << "set " << varName << "=" << strValue << "\n";
                     variables[varName] = strValue;
                 }
-                // Check if value contains math expression
                 else if (varValue.find('+') != std::string::npos ||
                     varValue.find('-') != std::string::npos ||
                     varValue.find('*') != std::string::npos ||
                     varValue.find('/') != std::string::npos) {
                     result << "set /a " << varName << "=" << varValue << "\n";
                 }
-                // Otherwise it's just a number
                 else {
                     result << "set /a " << varName << "=" << varValue << "\n";
                 }
@@ -167,7 +451,7 @@ std::string CompileBatLang(const std::string& sourceCode) {
 
             if (openParen != std::string::npos && closeParen != std::string::npos) {
                 std::string content = trimmedLine.substr(openParen + 1, closeParen - openParen - 1);
-                content = std::regex_replace(content, std::regex("^\\s+|\\s+$"), "");
+                content = TrimString(content);
 
                 if (content.find('"') == 0) {
                     std::string text = ExtractQuotedContent(trimmedLine, openParen + 1);
@@ -186,14 +470,14 @@ std::string CompileBatLang(const std::string& sourceCode) {
             }
         }
 
-        // println command (double echo)
+        // println command
         else if (trimmedLine.substr(0, 7) == "println") {
             size_t openParen = trimmedLine.find('(');
             size_t closeParen = trimmedLine.find(')');
 
             if (openParen != std::string::npos && closeParen != std::string::npos) {
                 std::string content = trimmedLine.substr(openParen + 1, closeParen - openParen - 1);
-                content = std::regex_replace(content, std::regex("^\\s+|\\s+$"), "");
+                content = TrimString(content);
 
                 if (content.find('"') == 0) {
                     std::string text = ExtractQuotedContent(trimmedLine, openParen + 1);
@@ -207,7 +491,7 @@ std::string CompileBatLang(const std::string& sourceCode) {
             }
         }
 
-        // wait command (old version for compatibility)
+        // wait command
         else if (trimmedLine.substr(0, 4) == "wait") {
             std::regex waitRegex("wait\\(\\s*(\\d+)\\s*\\)");
             std::smatch match;
@@ -217,7 +501,7 @@ std::string CompileBatLang(const std::string& sourceCode) {
             }
         }
 
-        // sleep command (new version)
+        // sleep command
         else if (trimmedLine.substr(0, 5) == "sleep") {
             std::regex sleepRegex("sleep\\(\\s*(\\d+)\\s*\\)");
             std::smatch match;
@@ -238,7 +522,7 @@ std::string CompileBatLang(const std::string& sourceCode) {
             }
         }
 
-        // end command (end of if block)
+        // end command
         else if (trimmedLine == "end") {
             if (indentLevel > 0) {
                 result << ")\n";
@@ -246,12 +530,12 @@ std::string CompileBatLang(const std::string& sourceCode) {
             }
         }
 
-        // stop command (pause)
+        // stop command
         else if (trimmedLine == "stop") {
             result << "pause\n";
         }
 
-        // clear command (cls)
+        // clear command
         else if (trimmedLine == "clear") {
             result << "cls\n";
         }
@@ -273,7 +557,7 @@ std::string CompileBatLang(const std::string& sourceCode) {
 
             if (openParen != std::string::npos && closeParen != std::string::npos) {
                 std::string content = trimmedLine.substr(openParen + 1, closeParen - openParen - 1);
-                content = std::regex_replace(content, std::regex("^\\s+|\\s+$"), "");
+                content = TrimString(content);
 
                 if (content.find('"') == 0) {
                     std::string title = ExtractQuotedContent(trimmedLine, openParen + 1);
@@ -285,112 +569,92 @@ std::string CompileBatLang(const std::string& sourceCode) {
             }
         }
 
-        // restart command (reboot)
-        else if (trimmedLine == "restart") {
-            result << "shutdown /r /t 0\n";
-        }
-
-        // Close() command (exit)
-        else if (trimmedLine == "Close()") {
-            result << "exit\n";
-        }
-
-        // namepc() command (hostname)
-        else if (trimmedLine == "namepc()") {
-            result << "hostname\n";
-        }
-
-        // ipcfg() command (ipconfig)
-        else if (trimmedLine == "ipcfg()") {
-            result << "ipconfig\n";
-        }
-
-        // ping command
-        else if (trimmedLine.substr(0, 4) == "ping") {
-            size_t openParen = trimmedLine.find('(');
-            size_t closeParen = trimmedLine.find(')');
-
-            if (openParen != std::string::npos && closeParen != std::string::npos) {
-                std::string target = trimmedLine.substr(openParen + 1, closeParen - openParen - 1);
-                target = std::regex_replace(target, std::regex("^\\s+|\\s+$"), "");
-
-                if (target.find('"') == 0) {
-                    target = ExtractQuotedContent(trimmedLine, openParen + 1);
-                }
-                result << "ping " << target << "\n";
+        // Windows API commands
+        else if (g_bWindowsAPIServiceEnabled) {
+            if (trimmedLine == "restart") {
+                result << "shutdown /r /t 0\n";
             }
-        }
-
-        // programlist() command (tasklist)
-        else if (trimmedLine == "programlist()") {
-            result << "tasklist\n";
-        }
-
-        // kill command
-        else if (trimmedLine.substr(0, 4) == "kill") {
-            size_t openParen = trimmedLine.find('(');
-            size_t closeParen = trimmedLine.find(')');
-
-            if (openParen != std::string::npos && closeParen != std::string::npos) {
-                std::string process = trimmedLine.substr(openParen + 1, closeParen - openParen - 1);
-                process = std::regex_replace(process, std::regex("^\\s+|\\s+$"), "");
-
-                if (process.find('"') == 0) {
-                    process = ExtractQuotedContent(trimmedLine, openParen + 1);
-                }
-                result << "taskkill /IM " << process << " /F\n";
+            else if (trimmedLine == "Close()") {
+                result << "exit\n";
             }
-        }
-
-        // showdata() command (date /t)
-        else if (trimmedLine == "showdata()") {
-            result << "date /t\n";
-        }
-
-        // time() command (time /t)
-        else if (trimmedLine == "time()") {
-            result << "time /t\n";
-        }
-
-        // msgbox command
-        else if (trimmedLine.substr(0, 6) == "msgbox") {
-            size_t openParen = trimmedLine.find('(');
-            size_t closeParen = trimmedLine.find(')');
-
-            if (openParen != std::string::npos && closeParen != std::string::npos) {
-                std::string text = trimmedLine.substr(openParen + 1, closeParen - openParen - 1);
-                text = std::regex_replace(text, std::regex("^\\s+|\\s+$"), "");
-
-                if (text.find('"') == 0) {
-                    text = ExtractQuotedContent(trimmedLine, openParen + 1);
-                }
-                result << "powershell -Command \"[System.Windows.Forms.MessageBox]::Show('" << text << "')\"\n";
+            else if (trimmedLine == "namepc()") {
+                result << "hostname\n";
             }
-        }
-
-        // openurl command
-        else if (trimmedLine.substr(0, 7) == "openurl") {
-            size_t openParen = trimmedLine.find('(');
-            size_t closeParen = trimmedLine.find(')');
-
-            if (openParen != std::string::npos && closeParen != std::string::npos) {
-                std::string url = trimmedLine.substr(openParen + 1, closeParen - openParen - 1);
-                url = std::regex_replace(url, std::regex("^\\s+|\\s+$"), "");
-
-                if (url.find('"') == 0) {
-                    url = ExtractQuotedContent(trimmedLine, openParen + 1);
-                }
-                result << "start " << url << "\n";
+            else if (trimmedLine == "ipcfg()") {
+                result << "ipconfig\n";
             }
-        }
+            else if (trimmedLine.substr(0, 4) == "ping") {
+                size_t openParen = trimmedLine.find('(');
+                size_t closeParen = trimmedLine.find(')');
 
-        // beep command
-        else if (trimmedLine.substr(0, 4) == "beep") {
-            std::regex beepRegex("beep\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\)");
-            std::smatch match;
+                if (openParen != std::string::npos && closeParen != std::string::npos) {
+                    std::string target = trimmedLine.substr(openParen + 1, closeParen - openParen - 1);
+                    target = TrimString(target);
 
-            if (std::regex_match(trimmedLine, match, beepRegex)) {
-                result << "powershell -c \"[console]::beep(" << match[1] << "," << match[2] << ")\"\n";
+                    if (target.find('"') == 0) {
+                        target = ExtractQuotedContent(trimmedLine, openParen + 1);
+                    }
+                    result << "ping " << target << "\n";
+                }
+            }
+            else if (trimmedLine == "programlist()") {
+                result << "tasklist\n";
+            }
+            else if (trimmedLine.substr(0, 4) == "kill") {
+                size_t openParen = trimmedLine.find('(');
+                size_t closeParen = trimmedLine.find(')');
+
+                if (openParen != std::string::npos && closeParen != std::string::npos) {
+                    std::string process = trimmedLine.substr(openParen + 1, closeParen - openParen - 1);
+                    process = TrimString(process);
+
+                    if (process.find('"') == 0) {
+                        process = ExtractQuotedContent(trimmedLine, openParen + 1);
+                    }
+                    result << "taskkill /IM " << process << " /F\n";
+                }
+            }
+            else if (trimmedLine == "showdata()") {
+                result << "date /t\n";
+            }
+            else if (trimmedLine == "time()") {
+                result << "time /t\n";
+            }
+            else if (trimmedLine.substr(0, 6) == "msgbox") {
+                size_t openParen = trimmedLine.find('(');
+                size_t closeParen = trimmedLine.find(')');
+
+                if (openParen != std::string::npos && closeParen != std::string::npos) {
+                    std::string text = trimmedLine.substr(openParen + 1, closeParen - openParen - 1);
+                    text = TrimString(text);
+
+                    if (text.find('"') == 0) {
+                        text = ExtractQuotedContent(trimmedLine, openParen + 1);
+                    }
+                    result << "powershell -Command \"[System.Windows.Forms.MessageBox]::Show('" << text << "')\"\n";
+                }
+            }
+            else if (trimmedLine.substr(0, 7) == "openurl") {
+                size_t openParen = trimmedLine.find('(');
+                size_t closeParen = trimmedLine.find(')');
+
+                if (openParen != std::string::npos && closeParen != std::string::npos) {
+                    std::string url = trimmedLine.substr(openParen + 1, closeParen - openParen - 1);
+                    url = TrimString(url);
+
+                    if (url.find('"') == 0) {
+                        url = ExtractQuotedContent(trimmedLine, openParen + 1);
+                    }
+                    result << "start " << url << "\n";
+                }
+            }
+            else if (trimmedLine.substr(0, 4) == "beep") {
+                std::regex beepRegex("beep\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\)");
+                std::smatch match;
+
+                if (std::regex_match(trimmedLine, match, beepRegex)) {
+                    result << "powershell -c \"[console]::beep(" << match[1] << "," << match[2] << ")\"\n";
+                }
             }
         }
     }
@@ -399,7 +663,7 @@ std::string CompileBatLang(const std::string& sourceCode) {
     return result.str();
 }
 
-// Button subclass procedure for custom drawing
+// Button subclass procedure
 LRESULT CALLBACK ButtonSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
     switch (msg) {
     case WM_PAINT: {
@@ -409,19 +673,15 @@ LRESULT CALLBACK ButtonSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         RECT rc;
         GetClientRect(hwnd, &rc);
 
-        // Get button state
         bool isHovered = GetWindowLongPtr(hwnd, GWLP_USERDATA) == 1;
         bool isPressed = GetAsyncKeyState(VK_LBUTTON) & 0x8000;
 
-        // Choose background color
         COLORREF bgColor = isPressed ? BATLANG_COLOR_ACCENT : (isHovered ? BATLANG_COLOR_BUTTON_HOVER : BATLANG_COLOR_BUTTON);
 
-        // Create brush and fill
         HBRUSH brush = CreateSolidBrush(bgColor);
         FillRect(hdc, &rc, brush);
         DeleteObject(brush);
 
-        // Draw border
         HPEN pen = CreatePen(PS_SOLID, 1, RGB(60, 60, 70));
         HPEN oldPen = (HPEN)SelectObject(hdc, pen);
         HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
@@ -430,11 +690,9 @@ LRESULT CALLBACK ButtonSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         SelectObject(hdc, oldBrush);
         DeleteObject(pen);
 
-        // Get button text
         wchar_t text[256];
         GetWindowTextW(hwnd, text, 256);
 
-        // Draw text
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, BATLANG_COLOR_TEXT);
         DrawTextW(hdc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -470,6 +728,12 @@ LRESULT CALLBACK ButtonSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 void CompileAndRun(bool runAfterCompile = false) {
     // Get text from TextBox
     int textLength = GetWindowTextLengthW(g_hTextBox);
+    if (textLength == 0) {
+        SetWindowTextW(g_hStatusBar, L"No code to compile!");
+        MessageBoxW(NULL, L"Please enter some code to compile!", L"Warning", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
     wchar_t* wBuffer = new wchar_t[textLength + 1];
     GetWindowTextW(g_hTextBox, wBuffer, textLength + 1);
 
@@ -482,8 +746,26 @@ void CompileAndRun(bool runAfterCompile = false) {
     delete[] wBuffer;
     delete[] buffer;
 
+    // Update status
+    SetWindowTextW(g_hStatusBar, L"Compiling...");
+
     // Compile code
-    std::string batCode = CompileBatLang(sourceCode);
+    std::vector<CompileError> errors;
+    std::string batCode = CompileBatLang(sourceCode, errors);
+
+    // Show errors if any
+    if (!errors.empty()) {
+        std::stringstream errorMsg;
+        errorMsg << "Compilation Errors:\n\n";
+        for (const auto& error : errors) {
+            errorMsg << "Line " << error.line << ": " << error.message << "\n";
+        }
+
+        std::wstring wErrorMsg = std::wstring(errorMsg.str().begin(), errorMsg.str().end());
+        SetWindowTextW(g_hStatusBar, L"Compilation failed!");
+        MessageBoxW(NULL, wErrorMsg.c_str(), L"Compilation Errors", MB_OK | MB_ICONERROR);
+        return;
+    }
 
     // Save to file
     std::ofstream batFile("program.bat");
@@ -491,10 +773,8 @@ void CompileAndRun(bool runAfterCompile = false) {
         batFile << batCode;
         batFile.close();
 
-        // Update status
         SetWindowTextW(g_hStatusBar, L"Compilation successful! program.bat created.");
 
-        // Run if needed
         if (runAfterCompile) {
             ShellExecuteW(NULL, L"open", L"program.bat", NULL, NULL, SW_SHOW);
             SetWindowTextW(g_hStatusBar, L"Program started!");
@@ -502,7 +782,7 @@ void CompileAndRun(bool runAfterCompile = false) {
     }
     else {
         SetWindowTextW(g_hStatusBar, L"Error creating file!");
-        MessageBoxW(NULL, L"Error creating file!", L"Error", MB_OK | MB_ICONERROR);
+        MessageBoxW(NULL, L"Error creating file!\nMake sure you have write permissions.", L"Error", MB_OK | MB_ICONERROR);
     }
 }
 
@@ -510,10 +790,8 @@ void CompileAndRun(bool runAfterCompile = false) {
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
     case WM_CREATE: {
-        // Create background brush
         g_hBrushBackground = CreateSolidBrush(BATLANG_COLOR_BG);
 
-        // Create fonts
         g_hFontTitle = CreateFontW(24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
@@ -526,13 +804,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Consolas");
 
-        // Create title
         HWND hTitle = CreateWindowW(L"STATIC", L"BatLang IDE",
             WS_CHILD | WS_VISIBLE | SS_CENTER,
             10, 10, 780, 40, hwnd, NULL, NULL, NULL);
         SendMessageW(hTitle, WM_SETFONT, (WPARAM)g_hFontTitle, TRUE);
 
-        // Create tabs
         INITCOMMONCONTROLSEX icex;
         icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
         icex.dwICC = ICC_TAB_CLASSES;
@@ -543,7 +819,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             10, 60, 780, 30, hwnd, NULL, NULL, NULL);
         SendMessageW(g_hTabControl, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
-        // Add tabs
         TCITEMW tie;
         tie.mask = TCIF_TEXT;
 
@@ -558,20 +833,17 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         tie.pszText = tab3;
         TabCtrl_InsertItem(g_hTabControl, 2, &tie);
 
-        // Create TextBox for code input
         g_hTextBox = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_MULTILINE |
             ES_AUTOVSCROLL | ES_AUTOHSCROLL | WS_VSCROLL | WS_HSCROLL,
             10, 95, 600, 300, hwnd, NULL, NULL, NULL);
         SendMessageW(g_hTextBox, WM_SETFONT, (WPARAM)g_hFontCode, TRUE);
 
-        // Create examples list (hidden by default)
         g_hExamplesList = CreateWindowW(WC_LISTVIEW, NULL,
             WS_CHILD | WS_BORDER | LVS_REPORT | LVS_SINGLESEL,
             10, 95, 600, 300, hwnd, NULL, NULL, NULL);
         SendMessageW(g_hExamplesList, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
-        // Setup ListView
         LVCOLUMNW lvc;
         lvc.mask = LVCF_WIDTH | LVCF_TEXT;
         lvc.cx = 580;
@@ -579,7 +851,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         lvc.pszText = colName;
         ListView_InsertColumn(g_hExamplesList, 0, &lvc);
 
-        // Add examples
         for (size_t i = 0; i < examples.size(); i++) {
             LVITEMW lvi;
             lvi.mask = LVIF_TEXT;
@@ -591,53 +862,61 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
         ShowWindow(g_hExamplesList, SW_HIDE);
 
-        // Create help box (hidden by default)
-        HWND hHelpBox = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT",
-            L"BatLang - Programming language for batch files\n\n"
-            L"Basic commands:\n"
-            L"• add variable = value - create variable\n"
-            L"• print(\"text\") - output text\n"
-            L"• println(\"text\") - double output\n"
-            L"• wait(seconds) - wait\n"
-            L"• sleep(seconds) - wait\n"
-            L"• if not x = y - condition\n"
-            L"• end - end of condition\n"
-            L"• stop - pause\n"
-            L"• clear - clear screen\n"
-            L"• color(N) - change color\n"
-            L"• title(\"text\") - window title\n"
-            L"• restart - reboot\n"
-            L"• Close() - exit\n"
-            L"• namepc() - computer name\n"
-            L"• ipcfg() - ipconfig\n"
-            L"• ping(address) - ping\n"
-            L"• programlist() - process list\n"
-            L"• kill(\"process.exe\") - kill process\n"
-            L"• showdata() - date\n"
-            L"• time() - time\n"
-            L"• msgbox(\"text\") - message box\n"
-            L"• openurl(\"link\") - open URL\n"
-            L"• beep(frequency, duration) - beep sound\n"
-            L"• end) - end of program",
+        g_hHelpBox = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT",
+            L"BatLang - Programming Language\n"
+            L"================================\n\n"
+            L"SERVICES (must be at the top):\n"
+            L"• ServiceAdd <ServiceGui.h>   - Enable GUI\n"
+            L"• ServiceAdd <WindowsAPI.h>    - Enable System commands\n\n"
+            L"GUI COMMANDS:\n"
+            L"• GuiService:AddGui(Frame)     - Create window\n"
+            L"• GuiService.Name = \"title\"     - Set window title\n"
+            L"• GuiService:AddGui(Button)    - Create button\n"
+            L"• Button.Text = \"text\"          - Set button text\n"
+            L"• $form.Controls.Add($button)   - Add button to form\n"
+            L"• $form.ShowDialog()            - Show window\n\n"
+            L"BASIC COMMANDS:\n"
+            L"• add var = value               - Create variable\n"
+            L"• print(\"text\")                  - Output text\n"
+            L"• println(\"text\")                 - Double output\n"
+            L"• wait(seconds)                  - Wait\n"
+            L"• sleep(seconds)                  - Wait\n"
+            L"• if not x = y                    - Condition\n"
+            L"• end                             - End condition\n"
+            L"• stop                            - Pause\n"
+            L"• clear                           - Clear screen\n"
+            L"• color(N)                         - Change color\n"
+            L"• title(\"text\")                    - Set title\n\n"
+            L"WINDOWS API COMMANDS:\n"
+            L"• restart                          - Reboot\n"
+            L"• Close()                          - Exit\n"
+            L"• namepc()                          - Computer name\n"
+            L"• ipcfg()                           - IP config\n"
+            L"• ping(\"address\")                   - Ping\n"
+            L"• programlist()                      - Process list\n"
+            L"• kill(\"process.exe\")                - Kill process\n"
+            L"• showdata()                         - Date\n"
+            L"• time()                             - Time\n"
+            L"• msgbox(\"text\")                     - Message box\n"
+            L"• openurl(\"link\")                    - Open URL\n"
+            L"• beep(freq, duration)               - Beep sound\n"
+            L"• end)                               - End program",
             WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
             10, 95, 600, 300, hwnd, NULL, NULL, NULL);
-        SendMessageW(hHelpBox, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
+        SendMessageW(g_hHelpBox, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
-        // Create Compile button
         g_hButtonCompile = CreateWindowW(L"BUTTON", L"Compile",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
             620, 95, 170, 45, hwnd, (HMENU)1, NULL, NULL);
         SendMessageW(g_hButtonCompile, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
         SetWindowSubclass(g_hButtonCompile, ButtonSubclassProc, 0, 0);
 
-        // Create Run button
-        g_hButtonRun = CreateWindowW(L"BUTTON", L"Run",
+        g_hButtonRun = CreateWindowW(L"BUTTON", L"▶️ Run",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
             620, 150, 170, 45, hwnd, (HMENU)2, NULL, NULL);
         SendMessageW(g_hButtonRun, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
         SetWindowSubclass(g_hButtonRun, ButtonSubclassProc, 0, 0);
 
-        // Create quick command buttons
         const wchar_t* quickCommands[] = { L"add", L"print", L"wait", L"stop", L"clear", L"end)" };
         for (int i = 0; i < 6; i++) {
             HWND hQuickBtn = CreateWindowW(L"BUTTON", quickCommands[i],
@@ -648,17 +927,26 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             SetWindowSubclass(hQuickBtn, ButtonSubclassProc, 0, 0);
         }
 
-        // Create status bar
+        HWND hServiceGuiBtn = CreateWindowW(L"BUTTON", L"Add GUI",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            620, 305, 80, 35, hwnd, (HMENU)20, NULL, NULL);
+        SendMessageW(hServiceGuiBtn, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
+        SetWindowSubclass(hServiceGuiBtn, ButtonSubclassProc, 0, 0);
+
+        HWND hServiceApiBtn = CreateWindowW(L"BUTTON", L"Add WinAPI",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            710, 305, 80, 35, hwnd, (HMENU)21, NULL, NULL);
+        SendMessageW(hServiceApiBtn, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
+        SetWindowSubclass(hServiceApiBtn, ButtonSubclassProc, 0, 0);
+
         g_hStatusBar = CreateWindowW(L"STATIC", L"Ready",
             WS_CHILD | WS_VISIBLE | SS_CENTER,
             10, 400, 780, 30, hwnd, NULL, NULL, NULL);
         SendMessageW(g_hStatusBar, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
-        // Add example code to TextBox
-        const wchar_t* exampleCode = examples[0].code.c_str();
+        const wchar_t* exampleCode = examples[2].code.c_str(); // GUI example
         SetWindowTextW(g_hTextBox, exampleCode);
 
-        // Enable visual styles
         SetWindowTheme(hwnd, L"Explorer", NULL);
         break;
     }
@@ -680,6 +968,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 int sel = TabCtrl_GetCurSel(g_hTabControl);
                 ShowWindow(g_hTextBox, sel == 0 ? SW_SHOW : SW_HIDE);
                 ShowWindow(g_hExamplesList, sel == 1 ? SW_SHOW : SW_HIDE);
+                ShowWindow(g_hHelpBox, sel == 2 ? SW_SHOW : SW_HIDE);
                 break;
             }
             }
@@ -691,30 +980,30 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         int wmId = LOWORD(wParam);
 
         switch (wmId) {
-        case 1: // Compile button
+        case 1:
             CompileAndRun(false);
             break;
 
-        case 2: // Run button
+        case 2:
             CompileAndRun(true);
             break;
 
-        case 10: // add
-        case 11: // print
-        case 12: // wait
-        case 13: // stop
-        case 14: // clear
-        case 15: // end)
-        {
-            // Insert quick command into text
+        case 10: case 11: case 12: case 13: case 14: case 15: {
             const wchar_t* commands[] = { L"add  = ", L"print(\"\" )", L"wait(1)", L"stop", L"clear", L"end)" };
             int index = wmId - 10;
             SendMessageW(g_hTextBox, EM_REPLACESEL, TRUE, (LPARAM)commands[index]);
             break;
         }
+
+        case 20:
+            SendMessageW(g_hTextBox, EM_REPLACESEL, TRUE, (LPARAM)L"ServiceAdd <ServiceGui.h>\n");
+            break;
+
+        case 21:
+            SendMessageW(g_hTextBox, EM_REPLACESEL, TRUE, (LPARAM)L"ServiceAdd <WindowsAPI.h>\n");
+            break;
         }
 
-        // Handle double click on example
         if ((HWND)lParam == g_hExamplesList && HIWORD(wParam) == LBN_DBLCLK) {
             int selIndex = ListView_GetNextItem(g_hExamplesList, -1, LVNI_SELECTED);
             if (selIndex >= 0 && selIndex < (int)examples.size()) {
@@ -722,31 +1011,37 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 TabCtrl_SetCurSel(g_hTabControl, 0);
                 ShowWindow(g_hTextBox, SW_SHOW);
                 ShowWindow(g_hExamplesList, SW_HIDE);
+                ShowWindow(g_hHelpBox, SW_HIDE);
             }
         }
         break;
     }
 
     case WM_SIZE: {
-        // Update sizes when window is resized
         int width = LOWORD(lParam);
         int height = HIWORD(lParam);
 
         SetWindowPos(g_hTextBox, NULL, 10, 95, width - 200, height - 150, SWP_NOZORDER);
         SetWindowPos(g_hExamplesList, NULL, 10, 95, width - 200, height - 150, SWP_NOZORDER);
+        SetWindowPos(g_hHelpBox, NULL, 10, 95, width - 200, height - 150, SWP_NOZORDER);
         SetWindowPos(g_hStatusBar, NULL, 10, height - 45, width - 20, 30, SWP_NOZORDER);
 
-        // Update button positions
         SetWindowPos(g_hButtonCompile, NULL, width - 180, 95, 170, 45, SWP_NOZORDER);
         SetWindowPos(g_hButtonRun, NULL, width - 180, 150, 170, 45, SWP_NOZORDER);
 
-        // Update quick button positions
         for (int i = 0; i < 6; i++) {
             HWND hQuickBtn = GetDlgItem(hwnd, 10 + i);
             if (hQuickBtn) {
                 SetWindowPos(hQuickBtn, NULL, width - 180 + (i % 2) * 85,
                     205 + (i / 2) * 40, 80, 35, SWP_NOZORDER);
             }
+        }
+
+        HWND hServiceGuiBtn = GetDlgItem(hwnd, 20);
+        HWND hServiceApiBtn = GetDlgItem(hwnd, 21);
+        if (hServiceGuiBtn && hServiceApiBtn) {
+            SetWindowPos(hServiceGuiBtn, NULL, width - 180, 305, 80, 35, SWP_NOZORDER);
+            SetWindowPos(hServiceApiBtn, NULL, width - 90, 305, 80, 35, SWP_NOZORDER);
         }
         break;
     }
@@ -776,20 +1071,18 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
 // Entry point
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    // Register window class
     const wchar_t CLASS_NAME[] = L"BatLangIDE";
 
     WNDCLASSW wc = {};
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = hInstance;
     wc.lpszClassName = CLASS_NAME;
-    wc.hbrBackground = NULL; // We'll draw background ourselves
+    wc.hbrBackground = NULL;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
 
     RegisterClassW(&wc);
 
-    // Create window
     HWND hwnd = CreateWindowExW(
         0, CLASS_NAME, L"BatLang",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
@@ -798,17 +1091,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     );
 
     if (hwnd == NULL) {
+        MessageBoxW(NULL, L"Failed to create window!", L"Error", MB_OK | MB_ICONERROR);
         return 0;
     }
 
-    // Enable dark mode
     BOOL enableDarkMode = TRUE;
     DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &enableDarkMode, sizeof(enableDarkMode));
 
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);
 
-    // Message loop
     MSG msg = {};
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
